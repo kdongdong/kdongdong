@@ -84,6 +84,7 @@ let campusMap = null;
 let buildingLayer = null;
 let lookupToken = 0;
 let keepMapStatus = false;
+let waterChart = null;
 
 function writeMapStatus(message, keep = false) {
   keepMapStatus = keep;
