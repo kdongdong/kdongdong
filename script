@@ -1,0 +1,896 @@
+"use strict";
+
+const USAGE_SETS = {
+  residential: [
+    { key: "toilet", name: "화장실", ratio: 0.33 },
+    { key: "shower", name: "샤워", ratio: 0.27 },
+    { key: "laundry", name: "세탁", ratio: 0.17 },
+    { key: "cleaning", name: "청소", ratio: 0.10 },
+    { key: "landscaping", name: "조경", ratio: 0.13 }
+  ],
+  office: [
+    { key: "toilet", name: "화장실", ratio: 0.45 },
+    { key: "shower", name: "샤워", ratio: 0.08 },
+    { key: "laundry", name: "세탁", ratio: 0.02 },
+    { key: "cleaning", name: "청소", ratio: 0.30 },
+    { key: "landscaping", name: "조경", ratio: 0.15 }
+  ],
+  school: [
+    { key: "toilet", name: "화장실", ratio: 0.42 },
+    { key: "shower", name: "샤워", ratio: 0.10 },
+    { key: "laundry", name: "세탁", ratio: 0.03 },
+    { key: "cleaning", name: "청소", ratio: 0.28 },
+    { key: "landscaping", name: "조경", ratio: 0.17 }
+  ],
+  hospital: [
+    { key: "toilet", name: "화장실", ratio: 0.28 },
+    { key: "shower", name: "샤워", ratio: 0.22 },
+    { key: "laundry", name: "세탁", ratio: 0.28 },
+    { key: "cleaning", name: "청소", ratio: 0.18 },
+    { key: "landscaping", name: "조경", ratio: 0.04 }
+  ],
+  commercial: [
+    { key: "toilet", name: "화장실", ratio: 0.38 },
+    { key: "shower", name: "샤워", ratio: 0.05 },
+    { key: "laundry", name: "세탁", ratio: 0.05 },
+    { key: "cleaning", name: "청소", ratio: 0.32 },
+    { key: "landscaping", name: "조경", ratio: 0.20 }
+  ]
+};
+
+// lpcd는 옥내급수 설계 원단위(L/인·일)이고, 저수조는 계획 1일 급수량의 5/10입니다.
+const TANK_SHARE = 0.5;
+const PROFILES = {
+  dormitory: { label: "기숙사·생활관", lpcd: 200, density: 16, usages: "residential" },
+  apartments: { label: "공동주택", lpcd: 250, density: 33, usages: "residential" },
+  residential: { label: "주택", lpcd: 230, density: 33, usages: "residential" },
+  house: { label: "주택", lpcd: 230, density: 40, usages: "residential" },
+  detached: { label: "주택", lpcd: 230, density: 40, usages: "residential" },
+  hotel: { label: "숙박시설", lpcd: 250, density: 30, usages: "residential" },
+  office: { label: "업무시설", lpcd: 60, density: 12, usages: "office" },
+  commercial: { label: "상업시설", lpcd: 80, density: 20, usages: "commercial" },
+  retail: { label: "판매시설", lpcd: 70, density: 20, usages: "commercial" },
+  supermarket: { label: "판매시설", lpcd: 70, density: 25, usages: "commercial" },
+  industrial: { label: "공장·창고", lpcd: 120, density: 40, usages: "commercial" },
+  warehouse: { label: "창고", lpcd: 40, density: 80, usages: "commercial" },
+  university: { label: "대학시설", lpcd: 50, density: 10, usages: "school" },
+  college: { label: "대학시설", lpcd: 50, density: 10, usages: "school" },
+  school: { label: "학교", lpcd: 45, density: 8, usages: "school" },
+  kindergarten: { label: "교육시설", lpcd: 45, density: 8, usages: "school" },
+  hospital: { label: "의료시설", lpcd: 350, density: 25, usages: "hospital" },
+  public: { label: "공공시설", lpcd: 50, density: 15, usages: "office" },
+  civic: { label: "공공시설", lpcd: 50, density: 15, usages: "office" },
+  government: { label: "공공시설", lpcd: 60, density: 12, usages: "office" },
+  default: { label: "일반 건물", lpcd: 120, density: 25, usages: "residential" }
+};
+
+function waterStandard(people, litersPerPerson) {
+  const count = Math.max(1, people);
+  const daily = count * litersPerPerson;
+  const tank = Math.round(daily * TANK_SHARE);
+  return { daily, tank, perPersonDaily: litersPerPerson, perPersonTank: tank / count };
+}
+
+const $ = (id) => document.getElementById(id);
+const number = (value, digits = 1) => value.toLocaleString("ko-KR", { maximumFractionDigits: digits });
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]));
+const hours = (value) => number(value, 2);
+let currentInput = null;
+let currentRecommendation = null;
+
+let selectedBuilding = null;
+let standardDaily = true;
+let campusMap = null;
+let buildingLayer = null;
+let lookupToken = 0;
+let keepMapStatus = false;
+
+function writeMapStatus(message, keep = false) {
+  keepMapStatus = keep;
+  $("map-status").textContent = message;
+}
+
+function validNumberInput(id) {
+  const field = $(id);
+  const valid = field.value.trim() !== "" && Number.isFinite(field.valueAsNumber) && field.checkValidity();
+  field.setAttribute("aria-invalid", String(!valid));
+  return valid;
+}
+
+function profileFor(tags) {
+  const amenity = tags.amenity || "";
+  const building = tags.building && tags.building !== "yes" ? tags.building : "";
+  return PROFILES[amenity] || PROFILES[building] || PROFILES[tags.tourism] || PROFILES.default;
+}
+
+function readLevels(tags) {
+  const raw = Number.parseFloat(tags["building:levels"]);
+  if (Number.isFinite(raw) && raw > 0) return { levels: raw, text: `지상 약 ${number(raw, 1)}층` };
+  const height = Number.parseFloat(String(tags.height || "").replace(/m$/i, ""));
+  if (Number.isFinite(height) && height > 0) {
+    const levels = Math.max(1, Math.round(height / 3.3));
+    return { levels, text: `높이 ${number(height, 1)}m → 약 ${levels}층` };
+  }
+  return { levels: 1, text: "층수 정보 없음 · 1층으로 추정" };
+}
+
+function ringArea(geometry) {
+  if (!geometry || geometry.length < 3) return 0;
+  const lat0 = geometry[0].lat * Math.PI / 180;
+  const mLat = 111320;
+  const mLon = 111320 * Math.cos(lat0);
+  let sum = 0;
+  for (let i = 0; i < geometry.length; i += 1) {
+    const a = geometry[i];
+    const b = geometry[(i + 1) % geometry.length];
+    sum += (a.lon * mLon) * (b.lat * mLat) - (b.lon * mLon) * (a.lat * mLat);
+  }
+  return Math.abs(sum) / 2;
+}
+
+function centroid(geometry) {
+  const total = geometry.reduce((sum, point) => ({ lat: sum.lat + point.lat, lon: sum.lon + point.lon }), { lat: 0, lon: 0 });
+  return [total.lat / geometry.length, total.lon / geometry.length];
+}
+
+function pointInRing(point, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const yi = ring[i].lat;
+    const xi = ring[i].lon;
+    const yj = ring[j].lat;
+    const xj = ring[j].lon;
+    const intersect = ((yi > point.lat) !== (yj > point.lat))
+      && (point.lon < (xj - xi) * (point.lat - yi) / ((yj - yi) || 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function buildingTitle(tags) {
+  const named = tags["name:ko"] || tags.name || tags["addr:housename"];
+  if (named) return named;
+  const street = [tags["addr:street"], tags["addr:housenumber"]].filter(Boolean).join(" ");
+  return street || "이름 없는 건물";
+}
+
+function buildProfile(element) {
+  const tags = element.tags || {};
+  const spec = profileFor(tags);
+  const levels = readLevels(tags);
+  const footprint = ringArea(element.geometry);
+  const gfa = footprint * levels.levels;
+  let people;
+  let peopleSource;
+  const capacity = Number.parseFloat(tags.capacity);
+  const flats = Number.parseFloat(tags["building:flats"]);
+  if (Number.isFinite(capacity) && capacity >= 1) {
+    people = Math.round(capacity);
+    peopleSource = "OpenStreetMap capacity 태그";
+  } else if (Number.isFinite(flats) && flats >= 1) {
+    people = Math.max(1, Math.round(flats * 2.3));
+    peopleSource = `세대 ${number(flats, 0)} × 2.3명`;
+  } else {
+    people = Math.max(1, Math.round(gfa / spec.density));
+    peopleSource = `바닥면적 ${number(footprint, 0)}㎡ × ${number(levels.levels, 1)}층 ÷ ${spec.density}㎡/명`;
+  }
+  const sized = waterStandard(people, spec.lpcd);
+  return {
+    name: buildingTitle(tags),
+    use: spec.label,
+    people,
+    peopleSource,
+    areaText: `바닥 ${number(footprint, 0)}㎡ · 연면적 약 ${number(gfa, 0)}㎡`,
+    floors: levels.text,
+    litersPerPerson: spec.lpcd,
+    tankFraction: TANK_SHARE,
+    dailyDesign: sized.daily,
+    tankCapacity: sized.tank,
+    drawingLiters: null,
+    usages: USAGE_SETS[spec.usages],
+    coordinates: centroid(element.geometry),
+    osmUrl: `https://www.openstreetmap.org/${element.type || "way"}/${element.id}`,
+    sourceLabel: "윤곽은 OpenStreetMap, 저수조는 설계기준",
+    note: `이 건물의 공개 도면에서 저수조 리터를 확인하지 못했습니다. 저수조 ${number(sized.tank, 0)}L는 계획 1일 급수량 ${number(sized.daily, 0)}L의 5/10입니다. 인당 하루 급수량은 ${spec.lpcd}L, 인당 저수량은 ${number(sized.perPersonTank)}L입니다.`,
+    extra: tags.building && tags.building !== "yes" ? `OSM building=${tags.building}` : "OSM에 세부 용도 태그가 없어 일반 가정값을 사용했습니다.",
+    links: [["OpenStreetMap", `https://www.openstreetmap.org/${element.type || "way"}/${element.id}`]]
+  };
+}
+
+function getBuildingState() {
+  if (!selectedBuilding) return { valid: false, isEstimate: true };
+  const peopleOk = validNumberInput("people-input");
+  const people = $("people-input").valueAsNumber;
+  const isEstimate = $("capacity-mode").value === "estimate";
+  const sized = peopleOk ? waterStandard(people, selectedBuilding.litersPerPerson) : null;
+  const estimateCapacity = sized ? sized.tank : NaN;
+  const capacityValid = isEstimate ? peopleOk : validNumberInput("capacity-input");
+  const capacity = isEstimate ? estimateCapacity : $("capacity-input").valueAsNumber;
+  const valid = peopleOk && capacityValid && capacity > 0;
+  return {
+    ...selectedBuilding,
+    people: peopleOk ? people : selectedBuilding.people,
+    capacity,
+    level: 100,
+    valid,
+    isEstimate,
+    sized,
+    storage: valid ? capacity : null
+  };
+}
+
+function drawGeometry(geometry) {
+  if (!campusMap) return;
+  if (buildingLayer) campusMap.removeLayer(buildingLayer);
+  buildingLayer = null;
+  if (!geometry || geometry.length < 3) return;
+  buildingLayer = L.polygon(geometry.map((point) => [point.lat, point.lon]), {
+    color: "#058c95", weight: 3, fillColor: "#058c95", fillOpacity: 0.28
+  }).addTo(campusMap);
+}
+
+function applyProfile(profile, geometry) {
+  selectedBuilding = profile;
+  $("building-details").hidden = false;
+  $("building-placeholder").hidden = true;
+  $("reservoir-fields").disabled = false;
+  $("people-input").value = String(profile.people);
+  $("capacity-mode").value = "estimate";
+  standardDaily = true;
+  const sized = waterStandard(profile.people, profile.litersPerPerson);
+  $("capacity-input").value = String(sized.tank);
+  const daily = sized.daily;
+  $("daily").value = String(daily);
+  $("recent-average").value = String(daily);
+  drawGeometry(geometry);
+  if (campusMap && profile.coordinates) {
+    campusMap.panTo(profile.coordinates);
+  }
+  writeMapStatus(`${profile.name} 건물을 선택했습니다. 인원 ${number(profile.people, 0)}명, 추정 저수조 ${$("capacity-input").value}L입니다. 실제 값이면 직접 입력으로 바꾸세요.`, true);
+  updateScreen();
+}
+
+function geometryFromBounds(bounds) {
+  if (!bounds) return null;
+  return [
+    { lat: bounds.minlat, lon: bounds.minlon },
+    { lat: bounds.minlat, lon: bounds.maxlon },
+    { lat: bounds.maxlat, lon: bounds.maxlon },
+    { lat: bounds.maxlat, lon: bounds.minlon }
+  ];
+}
+
+function boundsContain(bounds, lat, lon) {
+  return bounds && lat >= bounds.minlat && lat <= bounds.maxlat && lon >= bounds.minlon && lon <= bounds.maxlon;
+}
+
+async function postOverpass(query) {
+  const endpoints = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter"
+  ];
+  const attempts = endpoints.map(async (endpoint) => {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: query,
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) throw new Error(`overpass ${response.status}`);
+    return response.json();
+  });
+  return Promise.any(attempts);
+}
+
+async function queryBuilding(lat, lon) {
+  const query = `[out:json][timeout:8];way(around:70,${lat},${lon})["building"];out tags bb;`;
+  const data = await postOverpass(query);
+  const ways = (data.elements || []).filter((element) => element.tags && element.tags.building && element.bounds);
+  if (!ways.length) return null;
+  ways.forEach((element) => { element.geometry = geometryFromBounds(element.bounds); });
+  const containing = ways.filter((element) => boundsContain(element.bounds, lat, lon));
+  const pool = containing.length ? containing : ways;
+  pool.sort((a, b) => ringArea(a.geometry) - ringArea(b.geometry));
+  if (containing.length) return pool[0];
+  pool.sort((a, b) => {
+    const ca = centroid(a.geometry);
+    const cb = centroid(b.geometry);
+    return ((ca[0] - lat) ** 2 + (ca[1] - lon) ** 2) - ((cb[0] - lat) ** 2 + (cb[1] - lon) ** 2);
+  });
+  return pool[0];
+}
+
+function profileFromFeature(feature, lat, lon) {
+  const props = feature.properties || {};
+  const tags = { building: "yes" };
+  if (props.osm_key === "building" && props.osm_value) tags.building = props.osm_value;
+  if (props.osm_key === "amenity" && props.osm_value) tags.amenity = props.osm_value;
+  const spec = profileFor(tags);
+  let footprint = 800;
+  let geometry = null;
+  let areaText = "면적 정보 없음 · 바닥 800㎡로 가정";
+  if (Array.isArray(props.extent) && props.extent.length === 4) {
+    const [west, north, east, south] = props.extent;
+    const ring = [
+      { lat: south, lon: west },
+      { lat: south, lon: east },
+      { lat: north, lon: east },
+      { lat: north, lon: west }
+    ];
+    const area = ringArea(ring);
+    if (area >= 30 && area <= 20000) {
+      footprint = area;
+      geometry = ring;
+      areaText = `위치 범위 약 ${number(footprint, 0)}㎡`;
+    }
+  }
+  const people = Math.max(1, Math.round(footprint / spec.density));
+  const sized = waterStandard(people, spec.lpcd);
+  const name = props.name || [props.street, props.housenumber].filter(Boolean).join(" ") || "선택한 건물";
+  const osmType = props.osm_type === "W" ? "way" : props.osm_type === "R" ? "relation" : "node";
+  return {
+    name,
+    use: spec.label,
+    people,
+    peopleSource: `위치 검색 면적 ${number(footprint, 0)}㎡ ÷ ${spec.density}㎡/명`,
+    areaText,
+    floors: "층수 정보 없음 · 1층으로 추정",
+    litersPerPerson: spec.lpcd,
+    tankFraction: TANK_SHARE,
+    dailyDesign: sized.daily,
+    tankCapacity: sized.tank,
+    drawingLiters: null,
+    usages: USAGE_SETS[spec.usages],
+    coordinates: feature.geometry && feature.geometry.coordinates
+      ? [feature.geometry.coordinates[1], feature.geometry.coordinates[0]]
+      : [lat, lon],
+    osmUrl: props.osm_id ? `https://www.openstreetmap.org/${osmType}/${props.osm_id}` : `https://www.openstreetmap.org/#map=18/${lat}/${lon}`,
+    sourceLabel: "클릭 위치의 가장 가까운 장소",
+    note: `공개 도면의 저수조 용량은 없습니다. 저수조 ${number(sized.tank, 0)}L = 계획 1일 급수량 ${number(sized.daily, 0)}L × 5/10. 인당 하루 급수량 ${spec.lpcd}L, 인당 저수량 ${number(sized.perPersonTank)}L입니다. 층수를 모르면 1층으로 보아 인원이 작을 수 있습니다.`,
+    extra: props.city ? `${props.city}` : `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+    links: [["OpenStreetMap", props.osm_id ? `https://www.openstreetmap.org/${osmType}/${props.osm_id}` : `https://www.openstreetmap.org/#map=18/${lat}/${lon}`]],
+    geometry
+  };
+}
+
+function fallbackProfile(lat, lon) {
+  const spec = PROFILES.default;
+  const people = 50;
+  return {
+    name: "선택한 위치",
+    use: spec.label,
+    people,
+    peopleSource: "자료를 찾지 못해 50명으로 임시 입력",
+    areaText: "면적 미확인",
+    floors: "층수 미확인",
+    litersPerPerson: spec.lpcd,
+    tankFraction: TANK_SHARE,
+    dailyDesign: waterStandard(people, spec.lpcd).daily,
+    tankCapacity: waterStandard(people, spec.lpcd).tank,
+    drawingLiters: null,
+    usages: USAGE_SETS[spec.usages],
+    coordinates: [lat, lon],
+    osmUrl: `https://www.openstreetmap.org/#map=18/${lat}/${lon}`,
+    sourceLabel: "좌표만 선택됨",
+    note: "건물 도면을 찾지 못해 인원 50명에 같은 설계기준을 적용했습니다. 저수조는 계획 1일 급수량의 5/10이고, 인당 사용량은 그 급수량을 인원으로 나눈 값입니다.",
+    extra: `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+    links: [["이 위치의 지도", `https://www.openstreetmap.org/#map=18/${lat}/${lon}`]]
+  };
+}
+
+async function reverseProfile(lat, lon) {
+  const response = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}`, { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error(`reverse ${response.status}`);
+  const data = await response.json();
+  const feature = (data.features || [])[0];
+  return feature ? profileFromFeature(feature, lat, lon) : null;
+}
+
+async function selectAt(lat, lon) {
+  const token = ++lookupToken;
+  writeMapStatus("클릭한 위치의 건물을 확인하는 중입니다.", true);
+  let source = "";
+  const osmPromise = queryBuilding(lat, lon).catch(() => null);
+  const placePromise = reverseProfile(lat, lon).catch(() => null);
+  placePromise.then((profile) => {
+    if (token !== lookupToken || !profile || source === "osm") return;
+    source = "place";
+    applyProfile(profile, profile.geometry || null);
+  });
+  osmPromise.then((element) => {
+    if (token !== lookupToken || !element) return;
+    source = "osm";
+    applyProfile(buildProfile(element), element.geometry);
+  });
+  await Promise.allSettled([osmPromise, placePromise]);
+  if (token !== lookupToken || source) return;
+  writeMapStatus("이 위치에서 건물 윤곽을 찾지 못했습니다. 건물 위를 다시 클릭하세요.", true);
+}
+
+function updateBuildingInfo() {
+  const state = getBuildingState();
+  $("capacity-input").disabled = !selectedBuilding || state.isEstimate;
+  if (selectedBuilding && state.isEstimate && Number.isFinite(state.capacity)) {
+    $("capacity-input").value = String(Math.round(state.capacity));
+  }
+  $("selection-status").textContent = selectedBuilding
+    ? `${selectedBuilding.name} · ${selectedBuilding.use} · 분석 인원 ${number(state.people || selectedBuilding.people, 0)}명`
+    : "먼저 지도에서 건물을 선택하세요.";
+  $("capacity-badge").textContent = !selectedBuilding ? "건물 선택 대기" : state.isEstimate ? "설계기준 5/10" : "직접 입력";
+  $("capacity-badge").className = `badge ${state.isEstimate ? "warning" : "blue"}`;
+  if (selectedBuilding && state.isEstimate && state.sized && standardDaily) {
+    $("daily").value = String(state.sized.daily);
+    $("recent-average").value = String(state.sized.daily);
+  }
+  if (!selectedBuilding) {
+    $("people-source").textContent = "";
+    $("capacity-provenance").textContent = "건물을 선택하면 계획 1일 급수량의 5/10을 저수조로 두고, 인당 사용량은 그 급수량을 인원으로 나눕니다.";
+  } else {
+    $("building-name").textContent = selectedBuilding.name;
+    $("building-source").textContent = selectedBuilding.sourceLabel;
+    const peopleEdited = Number.isFinite(state.people) && state.people !== selectedBuilding.people;
+    $("people-source").textContent = peopleEdited ? `직접 수정 · 처음 추정은 ${number(selectedBuilding.people, 0)}명 (${selectedBuilding.peopleSource})` : selectedBuilding.peopleSource;
+    const peopleCount = state.people || selectedBuilding.people;
+    const sized = state.sized || waterStandard(peopleCount, selectedBuilding.litersPerPerson);
+    const tankText = state.valid ? `${number(state.capacity, 0)} L` : "—";
+    const perTank = state.valid ? state.capacity / peopleCount : sized.perPersonTank;
+    $("building-facts").innerHTML = [
+      ["건물 용도", selectedBuilding.use],
+      ["사용 인원", `${number(peopleCount, 0)}명`],
+      ["인원 근거", selectedBuilding.peopleSource],
+      ["면적", selectedBuilding.areaText],
+      ["규모", selectedBuilding.floors],
+      ["계획 1일 급수량", `${number(sized.daily, 0)} L`],
+      ["인당 하루 급수량", `${number(sized.perPersonDaily, 0)} L = 계획량 ÷ 인원`],
+      ["저수조", state.isEstimate ? `${tankText} · 계획량의 5/10` : `${tankText} · 직접 입력`],
+      ["인당 저수량", `${number(perTank)} L = 저수조 ÷ 인원`],
+      ["도면 용량", selectedBuilding.drawingLiters ? `${number(selectedBuilding.drawingLiters, 0)} L` : "공개 도면에 리터 없음"],
+      ["기타", selectedBuilding.extra]
+    ].map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+    $("building-note").textContent = selectedBuilding.note;
+    $("building-links").innerHTML = selectedBuilding.links
+      .map(([label, href]) => `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(label)} ↗</a>`)
+      .join(" · ");
+    const sizedNow = state.sized || waterStandard(state.people || selectedBuilding.people, selectedBuilding.litersPerPerson);
+    $("capacity-provenance").textContent = state.isEstimate
+      ? `계획 1일 급수량 ${number(sizedNow.daily, 0)}L ÷ ${number(state.people || selectedBuilding.people, 0)}명 = 인당 ${number(sizedNow.perPersonDaily, 0)}L. 저수조 ${number(sizedNow.tank, 0)}L는 그 계획량의 5/10이고, 인당 저수량은 ${number(sizedNow.perPersonTank)}L입니다. 공개 도면에 적힌 저수조 용량이 아닙니다.`
+      : "직접 입력한 용량으로 계산합니다. 인당 저수량은 이 용량을 인원으로 나눈 값입니다.";
+  }
+  $("effective-storage").textContent = state.valid ? `${number(state.storage)} L` : "—";
+  $("storage-formula").textContent = state.valid
+    ? `단수 계획 수량 ${number(state.storage)} L = 저수조 유효용량`
+    : "건물을 선택하면 저수조 유효용량으로 계산합니다.";
+  $("reservoir-error").hidden = !selectedBuilding || state.valid;
+  $("reservoir-error").textContent = "인원은 1명 이상, 용량은 0.01L 이상으로 입력하세요.";
+  const source = !selectedBuilding
+    ? "건물 선택 대기"
+    : state.isEstimate
+      ? "선택한 건물의 인원과 용도로 구한 저수조입니다. 절수안은 이 용량으로 단수 시간을 늘리는 조합입니다."
+      : "사용자 직접 입력 용량 기반 계산입니다.";
+  $("analysis-capacity-source").textContent = source;
+  $("recommendation-capacity-source").textContent = source;
+}
+
+function initializeMap() {
+  if (!window.L) {
+    $("map-status").textContent = "지도를 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 다시 열어 주세요.";
+    return;
+  }
+  try {
+    campusMap = L.map("campus-map", { scrollWheelZoom: true }).setView([37.5665, 126.978], 13);
+    const tiles = L.tileLayer("https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png", {
+      subdomains: "abc", minZoom: 1, maxZoom: 19, updateWhenIdle: true,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | Tiles &copy; <a href="https://www.openstreetmap.fr/">OSM France</a>, style <a href="https://www.hotosm.org/">HOT</a>'
+    });
+    let loadedTiles = 0;
+    let failedTiles = 0;
+    let loadingCycle = 0;
+    const reportMapStatus = () => {
+      if (keepMapStatus) return;
+      $("map-status").textContent = failedTiles > 0
+        ? "지도 배경 일부를 불러오지 못했습니다. 건물이 보이면 그 위를 클릭하세요."
+        : "지도를 움직인 뒤 건물 위를 클릭하세요. 선택한 건물의 저수조 용량으로 절수안을 계산합니다.";
+    };
+    tiles.on("loading", () => {
+      loadedTiles = 0;
+      failedTiles = 0;
+      const cycle = ++loadingCycle;
+      if (!keepMapStatus) $("map-status").textContent = "지도 배경을 불러오는 중입니다.";
+      setTimeout(() => {
+        if (!keepMapStatus && cycle === loadingCycle && loadedTiles === 0) {
+          $("map-status").textContent = "지도 연결이 지연되고 있습니다. 잠시 후 건물 위를 클릭하세요.";
+        }
+      }, 10000);
+    });
+    tiles.on("tileload", () => { loadedTiles += 1; });
+    tiles.on("tileerror", (event) => {
+      failedTiles += 1;
+      if (event.tile) event.tile.style.visibility = "hidden";
+      reportMapStatus();
+    });
+    tiles.on("load", reportMapStatus);
+    tiles.addTo(campusMap);
+    campusMap.on("click", (event) => { selectAt(event.latlng.lat, event.latlng.lng); });
+  } catch (error) {
+    $("map-status").textContent = "지도 초기화에 실패했습니다. 페이지를 다시 열어 주세요.";
+  }
+}
+
+function loadMapLibrary() {
+  const library = document.createElement("script");
+  library.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+  library.onload = initializeMap;
+  library.onerror = () => initializeMap();
+  document.head.appendChild(library);
+  setTimeout(() => {
+    if (!campusMap) $("map-status").textContent = "지도 연결이 지연되고 있습니다. 잠시 후 건물 위를 클릭하세요.";
+  }, 10000);
+}
+
+function diagnoseData({ capacity, level, previousLevel, observationHours, meterVolume, recentAverage }) {
+  const decrease = capacity * (previousLevel - level) / 100;
+  const expected = recentAverage * observationHours / 24;
+  const tolerance = Math.max(50, expected * 0.2);
+  const difference = Math.abs(decrease - meterVolume);
+  const messages = [];
+  let severity = 0;
+  const report = (grade, message) => {
+    severity = Math.max(severity, grade);
+    messages.push(message);
+  };
+  if (decrease < 0) {
+    report(1, "추가 급수가 없는 조건에서 수위가 상승했습니다. 급수 여부 또는 수위센서를 확인하세요.");
+  } else if (difference > tolerance) {
+    const severe = difference >= Math.max(decrease, meterVolume) * 0.5;
+    report(severe ? 2 : 1, decrease > meterVolume
+      ? "누수 또는 수위센서 이상 가능성: 계량기 사용량보다 저수조 감소량이 큽니다."
+      : "계량기 또는 수위센서 이상 가능성: 계량기 사용량에 비해 저수조 감소량이 작습니다.");
+  }
+  const ratio = expected > 0 ? meterVolume / expected : 0;
+  if (ratio > 2) report(2, "비정상 사용량 감지: 현재 계량기 사용량이 최근 평균 예상량의 2배를 초과합니다.");
+  else if (ratio > 1.5) report(1, "사용량 증가 주의: 현재 계량기 사용량이 최근 평균 예상량의 1.5배를 초과합니다.");
+  if (!messages.length) messages.push("입력한 수위 변화와 사용량 사이에 규칙상 모순이 발견되지 않았습니다.");
+  return { severity, status: ["정상", "주의", "이상 가능성"][severity], messages, decrease, expected, difference, ratio };
+}
+
+function updateDiagnosis() {
+  const hideNotes = () => {
+    $("analysis-diagnosis-note").hidden = true;
+    $("recommendation-diagnosis-note").hidden = true;
+  };
+  if (!getBuildingState().valid) {
+    $("diagnosis-error").hidden = true;
+    $("diagnosis-result").innerHTML = '<div class="diagnosis-summary warning"><strong>진단 대기</strong><p>건물을 선택하면 저수조 유효용량으로 절수안을 계산합니다. 수위계 기록이 있을 때만 아래를 채우세요.</p></div>';
+    hideNotes();
+    return;
+  }
+  const fields = ["observation-hours", "previous-level", "observed-level", "meter-volume", "recent-average"];
+  const filled = fields.every((id) => $(id).value.trim() !== "");
+  if (!filled) {
+    for (const id of fields) $(id).setAttribute("aria-invalid", "false");
+    $("diagnosis-error").hidden = true;
+    $("diagnosis-result").innerHTML = '<div class="diagnosis-summary"><strong>진단 생략</strong><p>수위계 기록이 없어 진단은 하지 않습니다. 절수 추천은 저수조 유효용량으로 계산합니다.</p></div>';
+    hideNotes();
+    return;
+  }
+  const valid = fields.map((id) => {
+    const field = $(id);
+    const ok = Number.isFinite(field.valueAsNumber) && field.checkValidity();
+    field.setAttribute("aria-invalid", String(!ok));
+    return ok;
+  }).every(Boolean);
+  $("diagnosis-error").hidden = valid;
+  let severity = 1;
+  if (!valid) {
+    $("diagnosis-error").textContent = "관측 시간·최근 평균은 0보다 크게, 시작·종료 수위는 0~100%, 계량기 사용량은 0 이상으로 입력하세요.";
+    $("diagnosis-result").innerHTML = '<div class="diagnosis-summary warning"><strong>주의 · 진단 대기</strong><p>입력값을 확인하면 진단 결과가 표시됩니다.</p></div>';
+  } else {
+    const state = getBuildingState();
+    const result = diagnoseData({
+      capacity: state.capacity,
+      level: $("observed-level").valueAsNumber,
+      previousLevel: $("previous-level").valueAsNumber,
+      observationHours: $("observation-hours").valueAsNumber,
+      meterVolume: $("meter-volume").valueAsNumber,
+      recentAverage: $("recent-average").valueAsNumber
+    });
+    severity = result.severity;
+    $("diagnosis-result").innerHTML = `<div class="diagnosis-summary ${["success", "warning", "danger"][severity]}"><span>데이터 일관성</span><strong>${result.status}</strong><ul>${result.messages.map((message) => `<li>${message}</li>`).join("")}</ul></div><dl class="diagnosis-metrics"><div><dt>수위 변화 환산</dt><dd>${number(Math.abs(result.decrease))} L ${result.decrease < 0 ? "증가" : "감소"}</dd></div><div><dt>평균 기준 구간 예상량</dt><dd>${number(result.expected)} L</dd></div><div><dt>계량기와 수위 환산량 차이</dt><dd>${number(result.difference)} L</dd></div><div><dt>현재 사용량 / 평균 예상량</dt><dd>${number(result.ratio, 2)}배</dd></div></dl>`;
+  }
+  for (const id of ["analysis-diagnosis-note", "recommendation-diagnosis-note"]) {
+    $(id).hidden = severity === 0;
+    $(id).textContent = valid
+      ? "데이터 진단에서 확인이 필요한 항목이 있습니다. 아래 결과는 입력한 저수량과 4단계 평균 사용량을 그대로 사용한 계산값입니다."
+      : "데이터 진단이 완료되지 않았습니다. 아래 계산은 기존 분석 입력값을 기준으로 계속 표시됩니다.";
+  }
+}
+
+function calculateDuration(storage, dailyUsage) {
+  return storage / (dailyUsage / 24);
+}
+
+function generateCombinations() {
+  const combinations = [];
+  for (const shower of [0, 10, 20, 30, 40]) {
+    for (const laundry of [0, 50, 100]) {
+      for (const cleaning of [0, 50, 100]) {
+        for (const landscaping of [0, 100]) {
+          combinations.push({ toilet: 0, shower, laundry, cleaning, landscaping });
+        }
+      }
+    }
+  }
+  return combinations;
+}
+
+function calculateRestrictionScore(plan) {
+  return plan.shower / 10 + plan.laundry / 25 + plan.cleaning / 50 + plan.landscaping / 100;
+}
+
+function evaluateCombination(plan, input) {
+  const savedRatio = input.usages.reduce((sum, usage) => sum + usage.ratio * plan[usage.key] / 100, 0);
+  const dailyUsage = input.daily * (1 - savedRatio);
+  const duration = calculateDuration(input.storage, dailyUsage);
+  return {
+    plan,
+    dailyUsage,
+    saved: input.daily - dailyUsage,
+    duration,
+    meetsTarget: duration >= input.target,
+    score: calculateRestrictionScore(plan)
+  };
+}
+
+function selectOptimalPlan(evaluations) {
+  return evaluations.filter((item) => item.meetsTarget)
+    .sort((a, b) => a.score - b.score || a.duration - b.duration)[0] || null;
+}
+
+function readInputs() {
+  const state = getBuildingState();
+  if (!state.valid) {
+    $("input-error").hidden = true;
+    return null;
+  }
+  const fields = ["daily", "target"];
+  const labels = { daily: "하루 평균 물 사용량", target: "목표 유지시간" };
+  let invalid = null;
+  const input = {
+    name: state.name,
+    use: state.use,
+    people: state.people,
+    storage: state.storage,
+    level: state.level,
+    usages: state.usages
+  };
+  for (const id of fields) {
+    const field = $(id);
+    const valid = field.value.trim() !== "" && Number.isFinite(field.valueAsNumber) && field.checkValidity();
+    field.setAttribute("aria-invalid", String(!valid));
+    if (!valid && !invalid) invalid = labels[id];
+    input[id] = field.valueAsNumber;
+  }
+  $("input-error").hidden = !invalid;
+  if (invalid) {
+    $("input-error").textContent = `${invalid} 입력값을 확인하세요. 사용량과 목표시간은 0.01 이상이어야 하며 입력 상한을 넘을 수 없습니다.`;
+    return null;
+  }
+  return input;
+}
+
+function updateCurrentStatus(input) {
+  const duration = calculateDuration(input.storage, input.daily);
+  const gap = duration - input.target;
+  const safe = gap >= 0;
+  const requiredVolume = input.daily / 24 * input.target;
+  const percent = input.storage / requiredVolume * 100;
+  $("per-person").textContent = `${number(input.daily / input.people)} L/명`;
+  $("required-volume").textContent = `${number(requiredVolume)} L`;
+  $("tank-volume").textContent = `${number(input.storage)} L`;
+  $("tank-percent").textContent = "유효용량 기준";
+  $("coverage-percent").textContent = `목표 대비 ${number(percent)}% 확보`;
+  $("water").style.height = "100%";
+  $("tank").setAttribute("aria-label", `단수 계획 수량 ${number(input.storage)}리터, 저수조 유효용량`);
+  $("current-hours").textContent = hours(duration);
+  $("hourly").textContent = `${number(input.daily / 24)} L/h`;
+  $("target-hours").textContent = `${hours(input.target)}시간`;
+  $("gap-label").textContent = safe ? "여유 시간" : "부족 시간";
+  $("gap-hours").textContent = `${hours(Math.abs(gap))}시간`;
+  $("gap-hours").className = safe ? "success-text" : "warning-text";
+  $("status-badge").className = `badge ${safe ? "success" : "warning"}`;
+  $("status-badge").textContent = safe ? "목표 충족 · 안전" : "저수량 부족";
+  $("current-alert").className = `alert ${safe ? "success" : "warning"}`;
+  $("current-alert").textContent = safe
+    ? "현재 사용량으로 목표시간을 확보할 수 있습니다."
+    : "현재 사용량으로는 목표시간 전에 물이 소진됩니다. 절수 대응이 필요합니다.";
+  $("usage-basis").textContent = `${input.name} · ${input.use} 기준 비율입니다.`;
+  $("usage-list").innerHTML = input.usages.map((usage) => `<div class="usage-row"><span class="dot"></span><span>${usage.name}</span><small>${Math.round(usage.ratio * 100)}%</small><strong>${number(input.daily * usage.ratio)} L</strong></div>`).join("");
+}
+
+function actionLabel(key, reduction) {
+  if (reduction === 0) return "정상 유지";
+  if (key === "landscaping" && reduction === 100) return "중단 · 100% 감축";
+  return `${reduction}% 감축`;
+}
+
+function renderOutagePlan(input, evaluations) {
+  const recommendation = evaluations.filter((item) => item.meetsTarget)
+    .sort((a, b) => a.score - b.score || a.duration - b.duration)[0] || null;
+  const longest = evaluations.reduce((best, item) => (item.duration > best.duration ? item : best));
+  const drinking = input.people * 3 * (input.target / 24);
+  const lines = [
+    `${input.name} (${input.use}) ${number(input.people, 0)}명 기준입니다. 남은 물 ${number(input.storage)}L로 목표 ${hours(input.target)}시간을 맞춥니다.`,
+    `음용수는 1인 3L/일로 따로 확보하세요. 목표 시간 동안 약 ${number(drinking)}L가 필요합니다.`,
+    "화장실은 모든 대응안에서 정상 유지합니다. 누수와 변기 물탱크부터 확인하세요."
+  ];
+  if (!recommendation) {
+    const shortageHours = input.target - longest.duration;
+    const refill = shortageHours * (longest.dailyUsage / 24);
+    lines.push(`샤워 40% 감축, 세탁·청소 중단, 조경 중단을 해도 ${hours(longest.duration)}시간입니다. 외부에서 약 ${number(refill)}L를 보충하거나 목표시간을 줄이세요.`);
+    lines.push("즉시 공지: 세탁기와 조경 급수를 끄고, 샤워 시간을 줄이며, 청소는 마른걸레로 바꿉니다.");
+  } else if (recommendation.score === 0) {
+    lines.push("추가 생활 제한 없이 목표시간을 넘깁니다. 수위만 주기적으로 확인하고, 새는 곳만 막으면 됩니다.");
+  } else {
+    const actions = input.usages
+      .filter((usage) => recommendation.plan[usage.key] > 0)
+      .map((usage) => `${usage.name} ${actionLabel(usage.key, recommendation.plan[usage.key])}`);
+    lines.push(`목표를 맞추는 최소 제한: ${actions.join(", ")}. 적용 후 약 ${hours(recommendation.duration)}시간 유지됩니다.`);
+    lines.push(`공지 예: ${input.name} 단수 대응으로 ${actions.join(", ")}를 적용합니다. 화장실은 계속 이용할 수 있습니다.`);
+  }
+  $("outage-plan").innerHTML = `<section class="playbook"><h3>단수 시 대응</h3><ol>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ol></section>`;
+}
+
+function updateRecommendation(evaluations, input) {
+  currentRecommendation = selectOptimalPlan(evaluations);
+  $("total-count").textContent = evaluations.length;
+  $("feasible-count").textContent = evaluations.filter((item) => item.meetsTarget).length;
+  $("apply-recommendation").disabled = !currentRecommendation;
+  renderOutagePlan(input, evaluations);
+  if (!currentRecommendation) {
+    const bestDuration = Math.max(...evaluations.map((item) => item.duration));
+    $("recommendation").innerHTML = `<div class="recommendation-card unavailable"><h3>목표를 충족하는 조합이 없습니다</h3><p>허용된 최대 절수를 적용해도 <strong>${hours(bestDuration)}시간</strong> 유지할 수 있습니다.</p><p class="small">목표까지 ${hours(input.target - bestDuration)}시간 부족합니다. 추가 급수를 확보하거나 목표시간을 조정하세요.</p></div>`;
+    return;
+  }
+  const result = currentRecommendation;
+  const actions = input.usages.map((usage) => `<div><dt>${usage.name}</dt><dd class="${result.plan[usage.key] === 0 ? "normal" : ""}">${actionLabel(usage.key, result.plan[usage.key])}</dd></div>`).join("");
+  $("recommendation").innerHTML = `<div class="recommendation-card"><div class="recommendation-top"><h3>추천 대응안</h3><span>✓ 최소 생활 제한</span></div><p class="recommendation-intro">${result.score === 0 ? "추가 제한 없이 목표시간을 충족합니다." : "목표시간을 충족하는 가장 낮은 제한 점수의 조합입니다."}</p><dl class="action-list">${actions}</dl><div class="recommendation-bottom"><div><span>적용 후 예상 유지시간</span><strong>${hours(result.duration)} <small>시간</small></strong></div><div class="score"><span>생활 제한 점수</span><strong>${result.score}<small>점</small></strong></div></div><p class="recommendation-stats"><b class="success-text">목표 대비 +${hours(result.duration - input.target)}시간</b><br>하루 사용량 ${number(result.dailyUsage)} L · 하루 절감량 ${number(result.saved)} L</p></div>`;
+}
+
+function updateManualScenario() {
+  $("shower-value").textContent = `${$("shower").value}%`;
+  $("landscaping-label").textContent = $("landscaping").checked ? "ON · 정상 유지" : "OFF · 중단";
+  if (!currentInput) {
+    $("manual-result").textContent = "건물을 선택하고 저수조·사용량을 확인하세요.";
+    return;
+  }
+  const plan = {
+    toilet: 0,
+    shower: Number($("shower").value),
+    laundry: Number($("laundry").value),
+    cleaning: Number($("cleaning").value),
+    landscaping: $("landscaping").checked ? 0 : 100
+  };
+  const result = evaluateCombination(plan, currentInput);
+  const gap = result.duration - currentInput.target;
+  $("manual-result").innerHTML = `<div><span>수동 설정 예상 유지시간</span><strong>${hours(result.duration)}시간</strong></div><div class="${result.meetsTarget ? "success-text" : "warning-text"}"><span>${result.meetsTarget ? "✓ 목표 충족" : "! 목표 미달"}</span><span>${gap >= 0 ? "여유" : "부족"} ${hours(Math.abs(gap))}시간 · ${result.score}점</span></div><p>하루 사용량 ${number(result.dailyUsage)} L · 절감량 ${number(result.saved)} L</p>`;
+}
+
+function updateCombinationTable(evaluations, input) {
+  const sorted = [...evaluations].sort((a, b) => a.score - b.score || Math.abs(a.duration - input.target) - Math.abs(b.duration - input.target));
+  $("combination-rows").innerHTML = sorted.map((item) => `<tr class="${item === currentRecommendation ? "selected" : ""}"><td>${item.plan.shower}%</td><td>${item.plan.laundry}%</td><td>${item.plan.cleaning}%</td><td>${item.plan.landscaping}%</td><td>${number(item.dailyUsage)}</td><td>${number(item.saved)}</td><td>${hours(item.duration)}시간</td><td>${item.score}</td><td class="${item.meetsTarget ? "success-text" : "warning-text"}">${item.meetsTarget ? "충족" : "미달"}${item === currentRecommendation ? " · 추천" : ""}</td></tr>`).join("");
+}
+
+function updateScreen() {
+  updateBuildingInfo();
+  updateDiagnosis();
+  currentInput = readInputs();
+  $("current-results").hidden = !currentInput;
+  $("usage-list").hidden = !currentInput;
+  if (!currentInput) {
+    currentRecommendation = null;
+    $("status-badge").textContent = "입력 확인";
+    $("status-badge").className = "badge warning";
+    $("per-person").textContent = "—";
+    $("total-count").textContent = "—";
+    $("feasible-count").textContent = "—";
+    $("usage-basis").textContent = "";
+    $("recommendation").textContent = "지도에서 건물을 고르면 인원·저수조를 채우고 단수 대응안을 계산합니다.";
+    $("outage-plan").innerHTML = "";
+    $("combination-rows").innerHTML = "";
+    $("apply-recommendation").disabled = true;
+  } else {
+    const evaluations = generateCombinations().map((plan) => evaluateCombination(plan, currentInput));
+    updateCurrentStatus(currentInput);
+    updateRecommendation(evaluations, currentInput);
+    updateCombinationTable(evaluations, currentInput);
+  }
+  updateManualScenario();
+}
+
+async function searchPlaces(query) {
+  const response = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=5`);
+  if (!response.ok) throw new Error(`search ${response.status}`);
+  const data = await response.json();
+  return data.features || [];
+}
+
+function renderSearchResults(features) {
+  const list = $("search-results");
+  if (!features.length) {
+    list.hidden = false;
+    list.innerHTML = "<li><button type=\"button\" disabled>검색 결과가 없습니다.</button></li>";
+    return;
+  }
+  list.hidden = false;
+  list.innerHTML = features.map((feature, index) => {
+    const props = feature.properties || {};
+    const label = props.name || props.street || "이름 없는 장소";
+    const detail = [props.street, props.city, props.state, props.country].filter(Boolean).join(" ");
+    return `<li><button type="button" data-index="${index}">${escapeHtml(label)}<small>${escapeHtml(detail)}</small></button></li>`;
+  }).join("");
+  list.querySelectorAll("button[data-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const feature = features[Number(button.dataset.index)];
+      const [lon, lat] = feature.geometry.coordinates;
+      list.hidden = true;
+      if (campusMap) campusMap.setView([lat, lon], Math.max(campusMap.getZoom(), 17));
+      selectAt(lat, lon);
+    });
+  });
+}
+
+$("reservoir-form").addEventListener("submit", (event) => event.preventDefault());
+$("situation-form").addEventListener("submit", (event) => event.preventDefault());
+$("diagnosis-form").addEventListener("submit", (event) => event.preventDefault());
+$("place-search").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = $("place-query").value.trim();
+  if (!query) return;
+  writeMapStatus(`"${query}" 검색 중입니다.`, true);
+  try {
+    const features = await searchPlaces(query);
+    renderSearchResults(features);
+    writeMapStatus(features.length ? "검색 결과를 고르면 그 위치의 건물을 분석합니다." : "검색 결과가 없습니다.", true);
+  } catch (error) {
+    writeMapStatus("주소 검색에 실패했습니다. 지도를 직접 이동해 건물을 클릭하세요.", true);
+  }
+});
+$("daily").addEventListener("input", () => { standardDaily = false; });
+$("people-input").addEventListener("input", () => { standardDaily = true; });
+for (const eventName of ["input", "change"]) {
+  $("situation-form").addEventListener(eventName, updateScreen);
+  $("diagnosis-form").addEventListener(eventName, updateDiagnosis);
+  $("reservoir-form").addEventListener(eventName, updateScreen);
+}
+for (const id of ["shower", "laundry", "cleaning", "landscaping"]) {
+  $(id).addEventListener("input", updateManualScenario);
+}
+$("apply-recommendation").addEventListener("click", () => {
+  if (!currentRecommendation) return;
+  const plan = currentRecommendation.plan;
+  for (const key of ["shower", "laundry", "cleaning"]) $(key).value = plan[key];
+  $("landscaping").checked = plan.landscaping === 0;
+  updateManualScenario();
+});
+$("reset").addEventListener("click", () => {
+  lookupToken += 1;
+  standardDaily = true;
+  $("situation-form").reset();
+  $("diagnosis-form").reset();
+  for (const key of ["shower", "laundry", "cleaning"]) $(key).value = "0";
+  $("landscaping").checked = true;
+  $("reservoir-form").reset();
+  $("place-query").value = "";
+  $("search-results").hidden = true;
+  $("search-results").innerHTML = "";
+  selectedBuilding = null;
+  $("reservoir-fields").disabled = true;
+  $("building-details").hidden = true;
+  $("building-placeholder").hidden = false;
+  if (buildingLayer && campusMap) campusMap.removeLayer(buildingLayer);
+  buildingLayer = null;
+  writeMapStatus("지도를 움직인 뒤 건물 위를 클릭하세요.", false);
+  updateScreen();
+});
+updateScreen();
+loadMapLibrary();
