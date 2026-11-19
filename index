@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="지도에서 건물을 선택하면 저수조 용량을 구하고, 단수 시간을 늘리는 절수안을 추천합니다.">
+  <title>건물 저수조 단수 절수 추천</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+  <!-- Chart.js CDN 추가 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="script.js?v=effective-volume" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="index.html"><span class="brand-icon">≈</span> WATERKEEP <span class="brand-sub">단수 절수 추천</span></a><span class="offline"><i></i> 선택 건물 저수조</span></header>
+  <main>
+    <div class="page-heading"><div><p class="eyebrow">EMERGENCY WATER MANAGEMENT</p><h1>선택 건물의 단수 절수 추천</h1><p class="subtitle">지도에서 건물을 고르면 그 건물의 저수조 용량을 구하고, 단수 시간을 늘리는 절수안을 추천합니다.</p></div><button id="reset" class="button-secondary" type="button">초기화 ↺</button></div>
+    <nav class="flow-guide" aria-label="분석 흐름"><a href="#map-title">01 지도 선택</a><b>→</b><a href="#building-card">02 건물정보</a><b>→</b><a href="#input-title">03 저수조 상태</a><b>→</b><a href="#status-title">04 유지시간 분석</a><b>→</b><a href="#recommendation-title">05 대응안 추천</a></nav>
+    <section class="card map-section" aria-labelledby="map-title">
+      <div class="section-heading"><span class="step">01</span><h2 id="map-title">지도에서 건물 선택</h2><span class="badge blue">OpenStreetMap</span></div>
+      <p class="section-description">지도를 이동한 뒤 건물을 클릭하세요. 그 건물의 면적·층수·용도로 저수조 용량을 계산하고, 단수가 길어지도록 절수 조합을 비교합니다.</p>
+      <div class="map-layout">
+        <div>
+          <form id="place-search" class="place-search">
+            <label class="sr-only" for="place-query">건물 또는 주소 검색</label>
+            <input id="place-query" type="search" placeholder="건물 또는 주소 검색" autocomplete="off">
+            <button class="button-secondary" type="submit">검색</button>
+          </form>
+          <ul id="search-results" class="search-results" hidden></ul>
+          <div id="campus-map" aria-label="건물 선택 지도"></div>
+          <p id="map-status" class="small muted" role="status">지도를 불러오는 중입니다. 지도는 인터넷 연결이 필요합니다.</p>
+        </div>
+        <aside id="building-card" class="building-preview" aria-live="polite">
+          <div id="building-placeholder"><span class="eyebrow">BUILDING</span><h3>분석할 건물을 선택하세요</h3><p>지도의 건물 위를 클릭하거나 주소로 검색하세요. 선택된 건물의 저수조 용량으로 절수안이 계산됩니다.</p></div>
+          <div id="building-details" hidden>
+            <span class="badge blue">02 건물정보 확인</span>
+            <h3 id="building-name">건물</h3>
+            <p id="building-source" class="source-label"></p>
+            <dl id="building-facts" class="building-facts"></dl>
+            <p id="building-note" class="small muted"></p>
+            <p id="building-links" class="source-links"></p>
+            <a class="continue-link" href="#input-title">저수조 상태 입력으로 이동 ↓</a>
+          </div>
+        </aside>
+      </div>
+    </section>
+    <div class="dashboard">
+      <section class="card input-panel" aria-labelledby="input-title">
+        <!-- 단수 수위 소진 추이 비교 그래프 영역 -->
+<div class="chart-container" style="position: relative; margin-top: 24px; height: 260px;">
+  <canvas id="waterLevelChart"></canvas>
+</div>
+        <div class="section-heading"><span class="step">03</span><h2 id="input-title">저수조 상태 입력</h2><span id="capacity-badge" class="badge warning">공개자료 미확인</span></div>
+        <p id="selection-status" class="section-description">먼저 지도에서 건물을 선택하세요.</p>
+        <form id="reservoir-form">
+          <fieldset id="reservoir-fields" disabled>
+            <legend class="sr-only">선택한 건물의 저수조 상태</legend>
+            <label for="people-input">분석 인원</label>
+            <div class="input-unit"><input id="people-input" type="number" min="1" max="1000000" step="1" required><span>명</span></div>
+            <p id="people-source" class="small muted"></p>
+            <label for="capacity-mode">저수조 용량 설정 방식</label>
+            <select id="capacity-mode"><option value="estimate">법령·설계기준 (1일 급수량의 5/10)</option><option value="manual">직접 입력</option></select>
+            <div id="manual-capacity-wrap"><label for="capacity-input">저수조 전체 용량</label><div class="input-unit"><input id="capacity-input" type="number" min="0.01" max="1000000000000" step="any" placeholder="예: 50000" required><span>L</span></div></div>
+            <p id="capacity-provenance" class="small muted">저수조는 계획 1일 급수량의 5/10입니다. 인당 사용량은 그 계획량을 인원으로 나눕니다. 공개 도면에 용량이 없으면 도면 리터를 넣지 않습니다.</p>
+            <p class="small muted">오늘 수위는 법령과 지도에 없습니다. 단수 계획은 저수조 유효용량이 차 있는 수량으로 계산합니다.</p>
+          </fieldset>
+        </form>
+        <p id="reservoir-error" class="alert danger" role="alert" hidden></p>
+        <div class="effective-storage" aria-live="polite"><span>단수 계획 수량 · 저수조 유효용량</span><output id="effective-storage" for="capacity-input capacity-mode">—</output><p id="storage-formula">저수조 유효용량을 남은 물로 사용</p></div>
+        <a class="continue-link" href="#status-title">유지시간 및 대응안 확인 ↓</a>
+      </section>
+
+      <section class="card diagnosis-panel" aria-labelledby="diagnosis-title">
+        <div class="section-heading"><span class="step">보조</span><h2 id="diagnosis-title">데이터 신뢰도 진단</h2><span class="badge blue">규칙 기반</span></div>
+        <p class="section-description">동일한 관측 구간의 물 감소량과 계량기 사용량을 비교합니다.</p>
+        <p class="diagnosis-assumption">이 진단은 수위계와 계량기 기록이 있을 때만 합니다. 기록이 없으면 건너뛰고, 절수 추천은 저수조 유효용량으로 계속됩니다.</p>
+        <form id="diagnosis-form" class="diagnosis-inputs">
+          <div><label for="observation-hours">관측 시간</label><div class="input-unit"><input id="observation-hours" type="number" min="0.01" max="8760" step="any" placeholder="선택"><span>시간</span></div></div>
+          <div><label for="previous-level">관측 시작 수위</label><div class="input-unit"><input id="previous-level" type="number" min="0" max="100" step="any" placeholder="선택"><span>%</span></div></div>
+          <div><label for="observed-level">관측 종료 수위</label><div class="input-unit"><input id="observed-level" type="number" min="0" max="100" step="any" placeholder="선택"><span>%</span></div></div>
+          <div><label for="meter-volume">관측 구간 계량기 사용량</label><div class="input-unit"><input id="meter-volume" type="number" min="0" max="1000000000000" step="any" placeholder="선택"><span>L</span></div></div>
+          <div><label for="recent-average">최근 평균 사용량</label><div class="input-unit"><input id="recent-average" type="number" min="0.01" max="1000000000000" step="any" placeholder="선택"><span>L/day</span></div></div>
+        </form>
+        <p class="small muted">수위계 기록이 있을 때만 채우세요. 최근 평균은 건물을 고르면 추정 하루 사용량으로 바뀝니다.</p>
+        <div id="diagnosis-error" class="alert danger" role="alert" hidden></div>
+        <div id="diagnosis-result" aria-live="polite"></div>
+        <details class="diagnosis-rules"><summary>진단 기준과 계산 방식</summary>
+          <p>수위 감소량 = 전체 용량 × (시작 수위 − 종료 수위) ÷ 100<br>평균 예상량 = 최근 평균 사용량 × 관측 시간 ÷ 24</p>
+          <p>허용 차이는 50L와 평균 예상량의 20% 중 큰 값입니다. 수위 감소량과 계량기 사용량 차이가 허용치를 초과하면 ‘주의’, 동시에 두 값 중 큰 값의 50% 이상이면 ‘이상 가능성’입니다.</p>
+          <p>계량기 사용량이 평균 예상량의 1.5배를 초과하면 ‘주의’, 2배를 초과하면 ‘비정상 사용량 감지’로 ‘이상 가능성’입니다. 수위 상승은 무급수 가정과 맞지 않아 ‘주의’입니다. 여러 조건이 겹치면 가장 높은 등급을 표시합니다.</p>
+          <p>기준은 시제품용 임시 규칙이며 AI 모델이나 고장 확정 진단이 아닙니다. ‘정상’은 입력값 사이의 모순이 규칙상 발견되지 않았다는 뜻입니다. 추정 용량으로 계산한 진단은 실제 용량 확인이 필요합니다.</p>
+        </details>
+      </section>
+
+      <section class="card status-panel" aria-labelledby="status-title">
+        <div class="section-heading"><span class="step">04</span><h2 id="status-title">단수 유지시간 분석</h2><span id="status-badge" class="badge">분석 중</span></div>
+        <form id="situation-form" class="analysis-settings">
+          <h3>분석 조건</h3><p class="small muted">입력한 하루 평균 사용량으로 유지시간과 절수안을 계산합니다.</p>
+          <label for="daily">하루 평균 물 사용량</label><div class="input-unit"><input id="daily" type="number" value="15000" min="0.01" max="1000000000000" step="any" required><span>L/day</span></div>
+          <label for="target">목표 유지시간</label><div class="input-unit"><input id="target" type="number" value="24" min="0.01" max="1000000" step="any" required><span>시간</span></div>
+          <div id="input-error" class="alert danger" role="alert" hidden></div>
+        </form>
+        <p class="small muted">하루 사용량 초기값은 인원 × 용도별 원단위입니다. 현장 계량값이 있으면 그 값으로 바꾸세요.</p>
+        <div class="per-person"><span>1인당 하루 사용량</span><strong id="per-person">—</strong></div>
+        <p id="analysis-diagnosis-note" class="alert warning" hidden></p>
+        <p id="analysis-capacity-source" class="small warning-text"></p>
+        <div id="current-results" aria-live="polite">
+          <div class="tank-scene"><div class="tank-side"><span>목표시간 필요량</span><strong id="required-volume">—</strong><span id="coverage-percent">—</span></div><div class="tank" role="img" id="tank"><div class="tank-lines"></div><div class="water" id="water"></div><div class="tank-label"><span>단수 계획 수량</span><strong id="tank-volume">—</strong><span id="tank-percent">—</span></div></div></div>
+          <p class="tank-caption">물탱크는 저수조 유효용량이 찬 단수 계획입니다.<br>계획 수량 = 선택한 건물의 저수조 유효용량</p>
+          <div class="time-main"><span>현재 유지 가능 시간</span><div><strong id="current-hours">—</strong><span>시간</span></div><p>현재 시간당 사용량 <b id="hourly">—</b></p></div>
+          <div class="metrics"><div><span>목표 유지시간</span><strong id="target-hours">—</strong></div><div><span id="gap-label">부족 시간</span><strong id="gap-hours">—</strong></div></div>
+          <div id="current-alert" class="alert"></div>
+        </div>
+        <div class="usage-section"><h3>용도별 하루 물 사용량</h3><p id="usage-basis" class="small muted"></p><div id="usage-list"></div></div>
+      </section>
+
+      <section class="card recommendation-panel" aria-labelledby="recommendation-title">
+        <div class="section-heading"><span class="step">05</span><h2 id="recommendation-title">절수 대응안 자동추천</h2><span class="badge blue">자동 비교</span></div>
+        <p id="recommendation-diagnosis-note" class="alert warning" hidden></p>
+        <p id="recommendation-capacity-source" class="small warning-text"></p>
+        <div class="comparison-counts"><div><span>전체 대응 조합</span><strong id="total-count">—</strong><small>개</small></div><div><span>목표 충족 조합</span><strong id="feasible-count">—</strong><small>개</small></div></div>
+        <div id="recommendation" aria-live="polite"></div>
+        <div id="outage-plan" aria-live="polite"></div>
+        <p class="ranking-note">선정 기준: 생활 제한 점수 최소 → 목표 초과시간 최소</p>
+        <details class="manual" open><summary>수동 시나리오 조정 <span>직접 비교해 보기</span></summary>
+          <div class="manual-body"><button id="apply-recommendation" class="button-secondary compact" type="button">추천안을 수동 설정에 가져오기</button>
+            <div class="slider-heading"><label for="shower">샤워 감축률</label><output id="shower-value" for="shower">0%</output></div><input id="shower" type="range" min="0" max="40" step="10" value="0"><div class="range-labels"><span>정상 유지</span><span>40% 감축</span></div>
+            <div class="manual-grid"><div><label for="laundry">세탁</label><select id="laundry"><option value="0">정상 유지</option><option value="50">50% 감축</option><option value="100">100% 감축</option></select></div><div><label for="cleaning">청소</label><select id="cleaning"><option value="0">정상 유지</option><option value="50">50% 감축</option><option value="100">100% 감축</option></select></div></div>
+            <label class="toggle-row" for="landscaping"><span>조경 물 사용 <small id="landscaping-label">ON · 정상 유지</small></span><input type="checkbox" id="landscaping" role="switch" checked></label>
+            <div id="manual-result" class="manual-result" aria-live="polite"></div>
+          </div>
+        </details>
+      </section>
+    </div>
+    <details class="card all-combinations"><summary>전체 대응 조합 비교 <span>90개 시나리오 상세 보기</span></summary><p class="small muted">생활 제한 점수, 목표시간과의 거리 순으로 표시합니다. 충족 여부는 반올림 전 값으로 판정합니다.</p><div class="table-scroll"><table><caption class="sr-only">전체 절수 대응 조합의 평가 결과</caption><thead><tr><th scope="col">샤워 감축</th><th scope="col">세탁 감축</th><th scope="col">청소 감축</th><th scope="col">조경 감축</th><th scope="col">사용량 L/day</th><th scope="col">절감량 L/day</th><th scope="col">유지시간</th><th scope="col">제한 점수</th><th scope="col">목표 충족</th></tr></thead><tbody id="combination-rows"></tbody></table></div></details>
+    <footer><strong>계산 기준</strong><p>지도에서 고른 건물의 바닥면적, 층수, 용도로 사용 인원을 구합니다. 계획 1일 급수량 = 인원 × 용도별 원단위이고, 저수조 용량 = 그 계획량의 5/10입니다. 인당 급수량은 계획량을 인원으로 나눈 값입니다.</p><p>원단위는 기숙사 200L, 주택 230~250L, 업무 60L, 학교 45~50L, 의료 350L입니다. 절수안은 화장실을 유지한 채 샤워·세탁·청소·조경을 조정해 단수 시간을 목표까지 늘리는 조합 중 생활 제한이 가장 작은 안입니다.</p><p>오늘 수위는 법령과 지도에 없으므로, 단수 계획 수량은 저수조 유효용량 전체를 씁니다.</p></footer>
+  </main>
+  <noscript>시뮬레이터를 사용하려면 브라우저의 JavaScript를 활성화하세요.</noscript>
+</body>
+</html>
