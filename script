@@ -84,7 +84,6 @@ let campusMap = null;
 let buildingLayer = null;
 let lookupToken = 0;
 let keepMapStatus = false;
-let waterChart = null;
 
 function writeMapStatus(message, keep = false) {
   keepMapStatus = keep;
@@ -781,90 +780,6 @@ function updateCombinationTable(evaluations, input) {
   $("combination-rows").innerHTML = sorted.map((item) => `<tr class="${item === currentRecommendation ? "selected" : ""}"><td>${item.plan.shower}%</td><td>${item.plan.laundry}%</td><td>${item.plan.cleaning}%</td><td>${item.plan.landscaping}%</td><td>${number(item.dailyUsage)}</td><td>${number(item.saved)}</td><td>${hours(item.duration)}시간</td><td>${item.score}</td><td class="${item.meetsTarget ? "success-text" : "warning-text"}">${item.meetsTarget ? "충족" : "미달"}${item === currentRecommendation ? " · 추천" : ""}</td></tr>`).join("");
 }
 
-function updateWaterLevelChart(input, currentRecommendation) {
-  const ctx = document.getElementById("waterLevelChart");
-  if (!ctx || typeof Chart === "undefined") return;
-
-  const maxHours = Math.max(input.target, currentRecommendation ? currentRecommendation.duration : input.target, 24);
-  const step = maxHours > 48 ? 4 : (maxHours > 24 ? 2 : 1);
-  const labels = [];
-  const normalData = [];
-  const recommendedData = [];
-
-  const normalHourlyUsage = input.daily / 24;
-  const recommendedDailyUsage = currentRecommendation ? currentRecommendation.dailyUsage : input.daily;
-  const recommendedHourlyUsage = recommendedDailyUsage / 24;
-
-  for (let h = 0; h <= maxHours; h += step) {
-    labels.push(`${h}시간`);
-
-    const normalVol = input.storage - (normalHourlyUsage * h);
-    normalData.push(Math.max(0, (normalVol / input.storage) * 100));
-
-    const recVol = input.storage - (recommendedHourlyUsage * h);
-    recommendedData.push(Math.max(0, (recVol / input.storage) * 100));
-  }
-
-  if (waterChart) {
-    waterChart.destroy();
-  }
-
-  waterChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels: labels,
-      datasets: [
-        {
-          label: "적용 전 (평균 사용)",
-          data: normalData,
-          borderColor: "#ba631d",
-          backgroundColor: "#ba631d15",
-          borderWidth: 2,
-          tension: 0.1,
-          fill: false
-        },
-        {
-          label: "절수 추천안 적용 후",
-          data: recommendedData,
-          borderColor: "#17805e",
-          backgroundColor: "#17805e15",
-          borderWidth: 2,
-          tension: 0.1,
-          fill: false
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: {
-          position: "top",
-          labels: { font: { size: 11, family: "Malgun Gothic" } }
-        },
-        tooltip: {
-          callbacks: {
-            label: function(context) {
-              return `${context.dataset.label}: 잔여 수위 약 ${context.raw.toFixed(1)}%`;
-            }
-          }
-        }
-      },
-      scales: {
-        y: {
-          min: 0,
-          max: 100,
-          title: { display: true, text: "저수조 잔여 수위 (%)" },
-          ticks: { callback: (value) => value + "%" }
-        },
-        x: {
-          title: { display: true, text: "경과 시간" }
-        }
-      }
-    }
-  });
-}
-
 function updateScreen() {
   updateBuildingInfo();
   updateDiagnosis();
@@ -883,16 +798,11 @@ function updateScreen() {
     $("outage-plan").innerHTML = "";
     $("combination-rows").innerHTML = "";
     $("apply-recommendation").disabled = true;
-    if (waterChart) {
-      waterChart.destroy();
-      waterChart = null;
-    }
   } else {
     const evaluations = generateCombinations().map((plan) => evaluateCombination(plan, currentInput));
     updateCurrentStatus(currentInput);
     updateRecommendation(evaluations, currentInput);
     updateCombinationTable(evaluations, currentInput);
-    updateWaterLevelChart(currentInput, currentRecommendation);
   }
   updateManualScenario();
 }
