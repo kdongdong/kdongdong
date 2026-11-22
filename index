@@ -7,8 +7,6 @@
   <title>건물 저수조 단수 절수 추천</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="style.css">
-  <!-- Chart.js CDN 추가 -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="script.js?v=effective-volume" defer></script>
 </head>
 <body>
@@ -46,10 +44,6 @@
     </section>
     <div class="dashboard">
       <section class="card input-panel" aria-labelledby="input-title">
-        <!-- 단수 수위 소진 추이 비교 그래프 영역 -->
-<div class="chart-container" style="position: relative; margin-top: 24px; height: 260px;">
-  <canvas id="waterLevelChart"></canvas>
-</div>
         <div class="section-heading"><span class="step">03</span><h2 id="input-title">저수조 상태 입력</h2><span id="capacity-badge" class="badge warning">공개자료 미확인</span></div>
         <p id="selection-status" class="section-description">먼저 지도에서 건물을 선택하세요.</p>
         <form id="reservoir-form">
